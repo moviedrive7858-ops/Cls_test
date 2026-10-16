@@ -1,0 +1,59 @@
+name: Telegram Copier
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install telethon
+
+      - name: Run Telegram Script
+        env:
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
+          SESSION_STRING: ${{ secrets.SESSION_STRING }}
+        run: |
+          python main.py
+
+      - name: Save Progress to Repo
+        if: always()
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f progress.json ]; then
+            git add progress.json
+            git commit -m "Auto update progress [skip ci]" || exit 0
+            git push
+          else
+            echo "progress.json ဖိုင် မရှိသေးပါသဖြင့် commit မလုပ်ပါ။"
+          fi
+
+      - name: Check Completion and Re-trigger if Pending
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMPLETED=$(python3 -c "import json, os; print(json.load(open('progress.json')).get('completed', False) if os.path.exists('progress.json') else False)")
+          echo "Finished status: $COMPLETED"
+          
+          if [ "$COMPLETED" != "True" ]; then
+            echo "မပြီးသေးပါသဖြင့် နောက်ထပ် Session အသစ်ကို အလိုအလျောက် ပြန်လည် စတင်ပါမည်..."
+            sleep 10
+            gh workflow run run.yml
+          else
+            echo "ကူးယူခြင်း အားလုံး ပြီးစီးသွားပါပြီ။"
+          fi
