@@ -44,7 +44,7 @@ jobs:
           fi
 
       - name: Check Completion and Re-trigger if Pending
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -54,7 +54,6 @@ jobs:
           if not files:
               print('False')
           else:
-              # အားလုံးပြီးမှ True ပြမည်
               all_done = all(json.load(open(f)).get('completed', False) for f in files)
               print(all_done)
           ")
