@@ -35,25 +35,35 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -f progress.json ]; then
-            git add progress.json
+          if ls progress*.json 1> /dev/null 2>&1; then
+            git add progress*.json
             git commit -m "Auto update progress [skip ci]" || exit 0
             git push
           else
-            echo "progress.json ဖိုင် မရှိသေးပါသဖြင့် commit မလုပ်ပါ။"
+            echo "progress json ဖိုင် မရှိသေးပါသဖြင့် commit မလုပ်ပါ။"
           fi
 
       - name: Check Completion and Re-trigger if Pending
+        if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COMPLETED=$(python3 -c "import json, os; print(json.load(open('progress.json')).get('completed', False) if os.path.exists('progress.json') else False)")
+          COMPLETED=$(python3 -c "
+          import json, glob
+          files = sorted(glob.glob('progress*.json'))
+          if not files:
+              print('False')
+          else:
+              # အားလုံးပြီးမှ True ပြမည်
+              all_done = all(json.load(open(f)).get('completed', False) for f in files)
+              print(all_done)
+          ")
           echo "Finished status: $COMPLETED"
-          
+
           if [ "$COMPLETED" != "True" ]; then
             echo "မပြီးသေးပါသဖြင့် နောက်ထပ် Session အသစ်ကို အလိုအလျောက် ပြန်လည် စတင်ပါမည်..."
             sleep 10
-            gh workflow run run.yml
+            gh workflow run "${{ github.workflow }}" --ref "${{ github.ref_name }}"
           else
             echo "ကူးယူခြင်း အားလုံး ပြီးစီးသွားပါပြီ။"
           fi
