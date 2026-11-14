@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import copy
 import time
 import asyncio
 from telethon import TelegramClient
@@ -28,25 +29,95 @@ MAX_EXECUTION_SECONDS = 20700  # 5.75 hours
 
 client = TelegramClient(StringSession(session_str), api_id, api_hash)
 
-# Telegram message link ဟုတ်/မဟုတ် စစ်ဆေးခြင်း (ဥပမာ - https://t.me/channel/123 သို့မဟုတ် https://t.me/c/12345/67)
+# Telegram Message Link ပုံစံ (ဥပမာ - https://t.me/channel/123 သို့မဟုတ် https://t.me/c/12345/67)
 TG_MSG_LINK_PATTERN = re.compile(
-    r'(https?://)?(www\.)?(t\.me|telegram\.me|telegram\.dog)/(c/\d+/\d+|[a-zA-Z0-9_]+/\d+)',
+    r'(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)/(?:c/\d+/\d+(?:/\d+)?|[a-zA-Z0-9_]+/\d+(?:/\d+)?)(?:\?\S*)?',
     re.IGNORECASE
 )
 
-def has_telegram_message_link(msg) -> bool:
-    """Message စာသား သို့မဟုတ် Hidden Hyperlink ထဲတွင် Telegram Message Link ပါ/မပါ စစ်ဆေးခြင်း"""
-    raw_text = msg.raw_text or ""
-    if TG_MSG_LINK_PATTERN.search(raw_text):
-        return True
+def _utf16_len(s: str) -> int:
+    return len(s.encode('utf-16-le')) // 2
 
-    # စာသားပေါ်မှာ အုပ်ထားတဲ့ Hyperlink (TextUrl) တွေကိုပါ စစ်ဆေးခြင်း
-    if msg.entities:
-        for entity in msg.entities:
-            if isinstance(entity, MessageEntityTextUrl) and entity.url:
-                if TG_MSG_LINK_PATTERN.search(entity.url):
-                    return True
-    return False
+def strip_telegram_message_links(raw_text: str, entities):
+    """
+    စာသားထဲမှ Telegram Message Link များကိုသာ ဖြတ်ထုတ်ပြီး
+    ကျန်စာသားများနှင့် မူရင်း Formatting (Bold/Italic/Links) များကို နေရာမပျက် ပြန်စီပေးခြင်း
+    """
+    if not raw_text:
+        return "", None
+
+    entities = copy.deepcopy(entities) if entities else []
+
+    # 1. Hidden Hyperlink (TextUrl) ထဲတွင် Telegram Message Link ပါနေပါက URL ကို ဖြုတ်ပစ်ခြင်း (စာသားကျန်မည်)
+    cleaned_entities = []
+    for ent in entities:
+        if isinstance(ent, MessageEntityTextUrl) and ent.url and TG_MSG_LINK_PATTERN.fullmatch(ent.url.strip()):
+            continue
+        cleaned_entities.append(ent)
+    entities = cleaned_entities
+
+    # 2. စာသားထဲတွင် တိုက်ရိုက်ပါနေသော Telegram Message Link များ၏ နေရာများကို ရှာခြင်း
+    matches = list(TG_MSG_LINK_PATTERN.finditer(raw_text))
+    if not matches:
+        return raw_text, (entities if entities else None)
+
+    # နောက်ဆုံး Match ကနေ အရှေ့ဆုံး Match ဆီ ပြောင်းပြန် ဖြတ်ထုတ်ခြင်း (Entity offset များ မလွဲစေရန်)
+    new_text = raw_text
+    for m in reversed(matches):
+        start_py, end_py = m.span()
+        start_u16 = _utf16_len(new_text[:start_py])
+        end_u16 = _utf16_len(new_text[:end_py])
+        removed_u16_len = end_u16 - start_u16
+
+        new_text = new_text[:start_py] + new_text[end_py:]
+
+        updated_entities = []
+        for ent in entities:
+            ent_start = ent.offset
+            ent_end = ent.offset + ent.length
+
+            # ဖြတ်လိုက်သည့် Link အတွင်း လုံးဝကျရောက်နေသော Entity (ဥပမာ MessageEntityUrl) ကို ဖယ်ရှားမည်
+            if ent_start >= start_u16 and ent_end <= end_u16:
+                continue
+            # ဖြတ်လိုက်သည့် Link ၏ နောက်တွင် ရှိနေသော Entity များကို အရှေ့သို့ ပြန်ရွှေ့မည်
+            elif ent_start >= end_u16:
+                ent.offset -= removed_u16_len
+            # ဖြတ်လိုက်သည့် Link ကို အုပ်မိနေသော Entity (ဥပမာ စာပိုဒ်တစ်ခုလုံး Bold လုပ်ထားခြင်း) ကို အရှည်ပြန်ညှိမည်
+            elif ent_start < end_u16 and ent_end > start_u16:
+                overlap = min(ent_end, end_u16) - max(ent_start, start_u16)
+                ent.length -= overlap
+                if ent.length <= 0:
+                    continue
+
+            updated_entities.append(ent)
+        entities = updated_entities
+
+    # အစနှင့် အဆုံးရှိ ပိုနေသော Space/Newline များကို ရှင်းလင်းခြင်း
+    leading_ws = len(new_text) - len(new_text.lstrip())
+    if leading_ws > 0:
+        lead_u16 = _utf16_len(new_text[:leading_ws])
+        new_text = new_text.lstrip()
+        final_entities = []
+        for ent in entities:
+            ent.offset -= lead_u16
+            if ent.offset < 0:
+                ent.length += ent.offset
+                ent.offset = 0
+            if ent.length > 0:
+                final_entities.append(ent)
+        entities = final_entities
+
+    new_text = new_text.rstrip()
+    max_u16 = _utf16_len(new_text)
+    final_entities = []
+    for ent in entities:
+        if ent.offset < max_u16:
+            if ent.offset + ent.length > max_u16:
+                ent.length = max_u16 - ent.offset
+            if ent.length > 0:
+                final_entities.append(ent)
+
+    return new_text, (final_entities if final_entities else None)
 
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
@@ -65,16 +136,13 @@ def is_time_up() -> bool:
     return (time.time() - START_TIME) >= MAX_EXECUTION_SECONDS
 
 async def copy_single_message(msg):
-    """Message တစ်ခုချင်းစီကို မူရင်း Formatting အတိုင်း ကူးယူခြင်း"""
-    if has_telegram_message_link(msg):
-        print(f"  [Skip - TG Message Link ပါနေသည်] Msg ID: {msg.id}")
-        return True
-
-    raw_text = msg.raw_text or ""
-    entities = msg.entities
+    """Message တစ်ခုချင်းစီကို TG Message Link ဖြုတ်ပြီး မူရင်းအတိုင်း ကူးယူခြင်း"""
+    cleaned_text, cleaned_entities = strip_telegram_message_links(msg.raw_text or "", msg.entities)
     temp_file_path = None
 
-    if not msg.media and not raw_text:
+    # Media လည်း မပါ၊ Link ဖြတ်ပြီးနောက် စာသားလည်း ဗလာဖြစ်သွားရင် ကျော်သွားမည်
+    if not msg.media and not cleaned_text:
+        print(f"  [Skip - TG Link သီးသန့်ဖြစ်နေသည်] Msg ID: {msg.id}")
         return True
 
     reply_arg = target_topic_id if target_topic_id != 1 else None
@@ -86,8 +154,8 @@ async def copy_single_message(msg):
                     await client.send_file(
                         target_group,
                         msg.media,
-                        caption=raw_text,
-                        formatting_entities=entities,
+                        caption=cleaned_text,
+                        formatting_entities=cleaned_entities,
                         reply_to=reply_arg
                     )
                 except Exception:
@@ -96,18 +164,18 @@ async def copy_single_message(msg):
                         await client.send_file(
                             target_group,
                             temp_file_path,
-                            caption=raw_text,
-                            formatting_entities=entities,
+                            caption=cleaned_text,
+                            formatting_entities=cleaned_entities,
                             reply_to=reply_arg
                         )
                 print(f"  [Media ပို့ပြီး] Msg ID: {msg.id}")
                 await asyncio.sleep(1.5)
 
-            elif raw_text:
+            elif cleaned_text:
                 await client.send_message(
                     target_group,
-                    raw_text,
-                    formatting_entities=entities,
+                    cleaned_text,
+                    formatting_entities=cleaned_entities,
                     reply_to=reply_arg,
                     link_preview=bool(msg.web_preview)
                 )
@@ -133,22 +201,15 @@ async def copy_single_message(msg):
                     pass
 
 async def copy_album_messages(album_msgs):
-    """Album (ပုံ/ဗီဒီယို အတွဲလိုက်) များကို မူရင်းအတိုင်း တစ်စုတည်း ကူးယူခြင်း"""
-    # Album ထဲက တစ်ခုခုမှာ Telegram Message Link ပါနေရင် တစ်တွဲလုံး ချန်ခဲ့မည်
-    if any(has_telegram_message_link(m) for m in album_msgs):
-        print(f"  [Skip Album - TG Message Link ပါနေသည်] Msg IDs: {[m.id for m in album_msgs]}")
-        return True
-
+    """Album (ပုံ/ဗီဒီယို အတွဲလိုက်) များကို TG Message Link ဖြုတ်ပြီး မူရင်းအတိုင်း ကူးယူခြင်း"""
     reply_arg = target_topic_id if target_topic_id != 1 else None
     temp_files = []
 
-    # Caption ပါတဲ့ message ကို ရှာခြင်း (Album မှာ ပထမဆုံးပုံမှာ Caption ပါလေ့ရှိသည်)
     caption_text = ""
     caption_entities = None
     for m in album_msgs:
         if m.raw_text:
-            caption_text = m.raw_text
-            caption_entities = m.entities
+            caption_text, caption_entities = strip_telegram_message_links(m.raw_text, m.entities)
             break
 
     while True:
@@ -163,7 +224,6 @@ async def copy_album_messages(album_msgs):
                     reply_to=reply_arg
                 )
             except Exception:
-                # Restricted Group ဖြစ်ပါက တစ်ခုချင်း Download ဆွဲပြီး Album ပြန်စုပို့ခြင်း
                 temp_files = []
                 for m in album_msgs:
                     if m.media:
@@ -235,7 +295,6 @@ async def main():
     pending_messages = [m for m in messages if m.id not in copied_set]
     print(f"ကျန်ရှိသည့် Message: {len(pending_messages)} / စုစုပေါင်း: {len(messages)} ခု\n")
 
-    # Album (grouped_id) များကို တစ်စုတည်းဖြစ်အောင် စုစည်းခြင်း
     grouped_batches = []
     i = 0
     while i < len(pending_messages):
