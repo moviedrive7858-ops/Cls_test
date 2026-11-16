@@ -17,10 +17,10 @@ session_str = os.environ.get("SESSION_STRING")
 # ဒီ ၄ ခုကို ပြောင်းထည့်ပြီး Run ပါ (General အခန်းဆိုရင် Topic ID နေရာမှာ 1 ထည့်ပါ)
 # =====================================================================
 source_group = -1002222189494       # Source Group ID
-source_topic_id = 48                # Source Group Topic ID
+source_topic_id = 56                # Source Group Topic ID
 
 target_group = -1003834013726       # Target Group ID
-target_topic_id = 366                 # Target Group Topic ID
+target_topic_id = 385                 # Target Group Topic ID
 # =====================================================================
 
 PROGRESS_FILE = f'progress_{source_topic_id}_to_{target_topic_id}.json'
